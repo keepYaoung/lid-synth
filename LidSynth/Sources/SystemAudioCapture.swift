@@ -1,6 +1,21 @@
 import Foundation
 import ScreenCaptureKit
 import AVFoundation
+import CoreGraphics
+
+/// Async timeout helper
+private func withTimeout<T>(seconds: Double, operation: @escaping () async throws -> T) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            throw CancellationError()
+        }
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
+    }
+}
 
 /// macOS 시스템 오디오를 ScreenCaptureKit으로 캡처.
 /// 캡처된 PCM 샘플을 링버퍼에 저장, AudioEngine에서 읽어감.
@@ -29,12 +44,30 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
     // MARK: - Start / Stop
 
     func start() async {
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false, onScreenWindowsOnly: false
-            )
+        // Check screen capture permission
+        let hasAccess = CGPreflightScreenCaptureAccess()
+        if !hasAccess {
+            fputs("[Audio] No screen capture permission — requesting...\n", stderr)
+            CGRequestScreenCaptureAccess()
+            // Give user time to grant, then re-check
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard CGPreflightScreenCaptureAccess() else {
+                fputs("[Audio] Permission denied — system audio unavailable (vinyl will use wavetable fallback)\n", stderr)
+                fputs("[Audio] Grant permission in: System Settings > Privacy & Security > Screen Recording\n", stderr)
+                isCapturing = false
+                return
+            }
+        }
+        fputs("[Audio] Starting system audio capture...\n", stderr)
 
-            // Capture all system audio (no specific app filter)
+        // Use a timeout to prevent hanging when ScreenCaptureKit blocks
+        do {
+            let content = try await withTimeout(seconds: 5) {
+                try await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: false
+                )
+            }
+
             let filter = SCContentFilter(
                 display: content.displays.first!,
                 excludingApplications: [],
@@ -43,11 +76,9 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
 
             let config = SCStreamConfiguration()
             config.capturesAudio = true
-            config.excludesCurrentProcessAudio = true  // 자기 소리 제외 (피드백 방지)
+            config.excludesCurrentProcessAudio = true
             config.sampleRate = 44100
             config.channelCount = 1
-
-            // 비디오 불필요 — 최소 설정
             config.width = 2
             config.height = 2
             config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
@@ -58,9 +89,9 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
 
             stream = newStream
             isCapturing = true
-            fputs("[Audio] System audio capture started\n", stderr)
+            fputs("[Audio] System audio capture started — vinyl will scratch system audio\n", stderr)
         } catch {
-            fputs("[Audio] Capture failed: \(error)\n", stderr)
+            fputs("[Audio] Capture failed: \(error) — vinyl will use wavetable fallback\n", stderr)
             isCapturing = false
         }
     }

@@ -41,6 +41,11 @@ final class AudioEngine {
     private var bpm: Double = 120
     private var muted = true
 
+    // Percussion state
+    private var percType: InstrumentType = .kick
+    private var percSamplePos: Int = 0      // position in one-shot percussion
+    private var percTriggered: Bool = false  // new hit triggered
+
     // Rhythm
     private var rhythmPhase: Double = 0
 
@@ -63,6 +68,21 @@ final class AudioEngine {
     private var lpB0: Double = 1, lpB1: Double = 0, lpB2: Double = 0
     private var lpA1: Double = 0, lpA2: Double = 0
 
+    // ── Vinyl scratch state ──
+    // Wavetable fallback (when no system audio)
+    private let scratchWaveLen = 2048
+    private let scratchWave: UnsafeMutablePointer<Double>
+    private var scratchPhase: Double = 0
+    // System audio scratch buffer (~2 seconds)
+    private let scratchBufSize = 88200
+    private let scratchBuf: UnsafeMutablePointer<Float>
+    private var scratchWritePos: Int = 0
+    private var scratchReadPos: Double = 0
+    // Shared scratch state
+    private var scratchRateTarget: Double = 0  // set from main thread
+    private var scratchRate: Double = 0        // smoothed on audio thread
+    private var scratchEnvLevel: Double = 0
+
     // Temp buffer for system audio read
     private let sysBuf: UnsafeMutablePointer<Float>
 
@@ -73,6 +93,12 @@ final class AudioEngine {
         sysBuf = .allocate(capacity: 1024)
         sysBuf.initialize(repeating: 0, count: 1024)
 
+        scratchWave = .allocate(capacity: 2048)
+        scratchWave.initialize(repeating: 0, count: 2048)
+
+        scratchBuf = .allocate(capacity: 88200)
+        scratchBuf.initialize(repeating: 0, count: 88200)
+
         harmonicsBuf = .allocate(capacity: 16)
         harmonicsBuf.initialize(repeating: 0, count: 16)
 
@@ -80,12 +106,15 @@ final class AudioEngine {
         for (i, v) in h.enumerated() { harmonicsBuf[i] = v }
         harmonicsCount = h.count
 
+        rebuildScratchWave()
         updateFilter(cutoff: 20000)
     }
 
     deinit {
         waveBuf.deallocate()
         sysBuf.deallocate()
+        scratchWave.deallocate()
+        scratchBuf.deallocate()
         harmonicsBuf.deallocate()
     }
 
@@ -93,12 +122,16 @@ final class AudioEngine {
 
     func setTargetFreq(_ f: Double)  { targetFreq = f }
     func setVolume(_ v: Double)      { volume = v }
-    func setMuted(_ m: Bool)         { muted = m }
+    func setMuted(_ m: Bool) {
+        muted = m
+        if !m { smoothFreq = targetFreq }  // unmute → sync freq immediately
+    }
     func setBpm(_ b: Double)         { bpm = b }
     func triggerNote()               { noteTrigger = true }
     func releaseNote()               { noteRelease = true }
 
     func setMixSystemAudio(_ on: Bool) { mixSystemAudio = on }
+    func setScratchRate(_ rate: Double) { scratchRateTarget = rate }
 
     /// 힌지 각도로 필터 cutoff 설정 (0°=200Hz, 180°=20kHz, 로그 스케일)
     func setFilterAngle(_ angle: Double) {
@@ -113,6 +146,25 @@ final class AudioEngine {
         for i in 0..<count { harmonicsBuf[i] = h[i] }
         for i in count..<maxHarmonics { harmonicsBuf[i] = 0 }
         harmonicsCount = count
+        rebuildScratchWave()
+    }
+
+    func setPercType(_ type: InstrumentType) {
+        percType = type
+    }
+
+    /// Pre-render one cycle of current harmonics into scratch wavetable.
+    private func rebuildScratchWave() {
+        let n = scratchWaveLen
+        let hCount = harmonicsCount
+        for i in 0..<n {
+            let p = 2.0 * Double.pi * Double(i) / Double(n)
+            var sample: Double = 0
+            for h in 0..<hCount {
+                sample += harmonicsBuf[h] * sin(Double(h + 1) * p)
+            }
+            scratchWave[i] = sample
+        }
     }
 
     func setMode(_ m: SynthMode) {
@@ -122,6 +174,14 @@ final class AudioEngine {
         envPhase = .idle
         noteTrigger = false
         noteRelease = false
+        // Reset scratch state
+        scratchRateTarget = 0
+        scratchRate = 0
+        scratchEnvLevel = 0
+        scratchPhase = 0
+        if m == .vinyl {
+            scratchReadPos = Double((scratchWritePos + scratchBufSize - 4096) % scratchBufSize)
+        }
     }
 
     func copyWaveform() -> [Float] {
@@ -159,6 +219,38 @@ final class AudioEngine {
         lpB2 = b2 / a0
         lpA1 = a1 / a0
         lpA2 = a2 / a0
+    }
+
+    /// Generate one sample of percussion at given sample position.
+    /// Returns 0 when the one-shot is done.
+    private func percSample(pos: Int, type: InstrumentType, vol: Double) -> Double {
+        let t = Double(pos) / kSampleRate  // time in seconds
+
+        switch type {
+        case .kick:
+            // Kick: pitch-dropping sine + click transient
+            // Frequency sweeps from 150Hz down to 50Hz
+            let pitchEnv = 150.0 * exp(-20.0 * t) + 50.0
+            let ampEnv = exp(-5.0 * t)
+            let click = pos < 30 ? exp(-Double(pos) / 5.0) * 0.6 : 0.0
+            let phase = 2.0 * .pi * pitchEnv * t
+            return (sin(phase) * ampEnv + click) * vol
+        case .snare:
+            // Snare: short tone body + noise
+            let toneEnv = exp(-20.0 * t)
+            let noiseEnv = exp(-8.0 * t)
+            let tone = sin(2.0 * .pi * 180.0 * t) * toneEnv * 0.5
+            let noise = Double.random(in: -1...1) * noiseEnv * 0.7
+            return (tone + noise) * vol
+        case .hihat:
+            // Hi-hat: filtered noise, very short
+            let env = exp(-30.0 * t)
+            let noise = Double.random(in: -1...1)
+            // Simple highpass feel: subtract low freq
+            return noise * env * vol * 0.6
+        default:
+            return 0
+        }
     }
 
     private func applyFilter(_ x: Double) -> Double {
@@ -207,6 +299,82 @@ final class AudioEngine {
         let isMuted = muted
         let doMix = mixSystemAudio
 
+        // ── Vinyl mode: scratch ──
+        if currentMode == .vinyl {
+            // Smooth scratch rate: fast attack, slow decay (natural vinyl feel)
+            let rateTarget = scratchRateTarget
+            let rateCoeff = abs(rateTarget) > abs(scratchRate) ? 0.3 : 0.05
+            scratchRate += (rateTarget - scratchRate) * rateCoeff
+
+            let useSysAudio = systemAudio?.isCapturing ?? false
+            let isScratching = abs(scratchRate) > 0.01
+            let targetEnv: Double = isScratching ? 1.0 : 0.0
+            let envCoeff: Double = isScratching ? 0.15 : 0.008  // slower release for continuity
+
+            if useSysAudio {
+                // ── System audio scratch: DJ-style record scrubbing ──
+                // Read fresh audio into ring buffer
+                _ = systemAudio!.readSamples(into: sysBuf, count: frames)
+                for i in 0..<frames {
+                    scratchBuf[scratchWritePos] = sysBuf[i]
+                    scratchWritePos = (scratchWritePos + 1) % scratchBufSize
+                }
+
+                // rate: 1.0 = normal playback, + scratchRate shifts speed/direction
+                let rate = 1.0 + scratchRate
+                let sEnv: Double = isScratching ? 1.0 : 0.7  // quieter when not scratching
+
+                for i in 0..<frames {
+                    scratchEnvLevel += (sEnv - scratchEnvLevel) * 0.05
+
+                    scratchReadPos += rate
+                    while scratchReadPos < 0 { scratchReadPos += Double(scratchBufSize) }
+                    while scratchReadPos >= Double(scratchBufSize) { scratchReadPos -= Double(scratchBufSize) }
+
+                    // Stay behind write head
+                    let dist = Double((scratchWritePos - Int(scratchReadPos) + scratchBufSize) % scratchBufSize)
+                    if dist < 512 && rate >= 1.0 {
+                        scratchReadPos = Double((scratchWritePos - 4096 + scratchBufSize) % scratchBufSize)
+                    }
+
+                    let idx0 = Int(scratchReadPos) % scratchBufSize
+                    let idx1 = (idx0 + 1) % scratchBufSize
+                    let frac = scratchReadPos - floor(scratchReadPos)
+                    let sample = Double(scratchBuf[idx0]) * (1.0 - frac) + Double(scratchBuf[idx1]) * frac
+
+                    let out = sample * scratchEnvLevel * vol
+                    let clipped = Float(max(-1.0, min(1.0, out)))
+                    data[i] = clipped
+                    waveBuf[(waveBufPos + i) % waveBufSize] = clipped
+                }
+            } else {
+                // ── Wavetable fallback: scratch instrument waveform ──
+                let baseAdvance = 220.0 * Double(scratchWaveLen) / kSampleRate
+                let rate = baseAdvance * (1.0 + scratchRate)
+                let wLen = scratchWaveLen
+
+                for i in 0..<frames {
+                    scratchEnvLevel += (targetEnv - scratchEnvLevel) * envCoeff
+
+                    scratchPhase += rate
+                    while scratchPhase < 0 { scratchPhase += Double(wLen) }
+                    while scratchPhase >= Double(wLen) { scratchPhase -= Double(wLen) }
+
+                    let idx0 = Int(scratchPhase) % wLen
+                    let idx1 = (idx0 + 1) % wLen
+                    let frac = scratchPhase - floor(scratchPhase)
+                    let sample = scratchWave[idx0] * (1.0 - frac) + scratchWave[idx1] * frac
+
+                    let out = sample * scratchEnvLevel * vol
+                    let clipped = Float(max(-1.0, min(1.0, out)))
+                    data[i] = clipped
+                    waveBuf[(waveBufPos + i) % waveBufSize] = clipped
+                }
+            }
+            waveBufPos = (waveBufPos + frames) % waveBufSize
+            return
+        }
+
         // ── Rhythm clock ──
         if currentMode == .rhythm {
             rhythmPhase += bpm / 60.0 * Double(frames) / kSampleRate
@@ -227,22 +395,31 @@ final class AudioEngine {
             }
             if noteTrigger {
                 noteTrigger = false
-                if envLevel > 0.001 && smoothFreq > 20 {
-                    xfadeOldPhase = phase
-                    xfadeOldFreq = smoothFreq
-                    xfadeOldEnv = envLevel
-                    xfadePos = 0
+                if percType.isPercussion {
+                    // Percussion: reset one-shot position
+                    percSamplePos = 0
+                    percTriggered = true
+                } else {
+                    if envLevel > 0.001 && smoothFreq > 20 {
+                        xfadeOldPhase = phase
+                        xfadeOldFreq = smoothFreq
+                        xfadeOldEnv = envLevel
+                        xfadePos = 0
+                    }
+                    smoothFreq = targetFreq
+                    phase = 0
+                    envLevel = 0
+                    envPhase = .attack
                 }
-                smoothFreq = targetFreq
-                phase = 0
-                envLevel = 0
-                envPhase = .attack
             }
         }
 
         // ── Frequency smoothing ──
         if currentMode == .glide {
-            smoothFreq += (targetFreq - smoothFreq) * 0.04
+            // Fast catch-up when far from target (cold start), smooth when close
+            let diff = abs(targetFreq - smoothFreq)
+            let coeff = diff > 50 ? 0.5 : 0.08
+            smoothFreq += (targetFreq - smoothFreq) * coeff
         } else {
             smoothFreq = targetFreq
         }
@@ -265,10 +442,16 @@ final class AudioEngine {
             }
         }
 
-        // ── Read system audio ──
-        if doMix, let sysCapture = systemAudio, sysCapture.isCapturing {
+        // ── Read system audio for scratch overlay (Command key held) ──
+        let shouldMixSys = doMix && currentMode != .vinyl
+        if shouldMixSys, let sysCapture = systemAudio, sysCapture.isCapturing {
             _ = sysCapture.readSamples(into: sysBuf, count: frames)
-        } else {
+            // Feed into scratch ring buffer for scrubbing
+            for i in 0..<frames {
+                scratchBuf[scratchWritePos] = sysBuf[i]
+                scratchWritePos = (scratchWritePos + 1) % scratchBufSize
+            }
+        } else if !shouldMixSys {
             for i in 0..<frames { sysBuf[i] = 0 }
         }
 
@@ -292,31 +475,62 @@ final class AudioEngine {
 
             // Synth sample
             var synthSample: Double = 0
-            if active {
+            if percType.isPercussion {
+                // Percussion: one-shot synthesis (no pitch/envelope, self-contained)
+                if percTriggered {
+                    let maxLen = Int(kSampleRate * 0.5)  // max 500ms
+                    if percSamplePos < maxLen {
+                        synthSample = percSample(pos: percSamplePos, type: percType, vol: vol)
+                        percSamplePos += 1
+                    }
+                }
+            } else if active {
                 let p = phase + 2.0 * .pi * freq * t / kSampleRate
                 for idx in 0..<hCount {
                     synthSample += hBuf[idx] * sin(Double(idx + 1) * p)
                 }
                 synthSample *= envVal * vol
-            }
 
-            // Crossfade old note
-            if xfadePos < xfadeN {
-                let px = xfadeOldPhase + 2.0 * .pi * xfadeOldFreq * Double(i) / kSampleRate
-                var old: Double = 0
-                for idx in 0..<hCount {
-                    old += hBuf[idx] * sin(Double(idx + 1) * px)
+                // Crossfade old note
+                if xfadePos < xfadeN {
+                    let px = xfadeOldPhase + 2.0 * .pi * xfadeOldFreq * Double(i) / kSampleRate
+                    var old: Double = 0
+                    for idx in 0..<hCount {
+                        old += hBuf[idx] * sin(Double(idx + 1) * px)
+                    }
+                    let fade = xfadeOldEnv * (1.0 - Double(xfadePos) / Double(xfadeN))
+                    synthSample += old * fade * vol
+                    if i == frames - 1 { xfadePos += frames }
                 }
-                let fade = xfadeOldEnv * (1.0 - Double(xfadePos) / Double(xfadeN))
-                synthSample += old * fade * vol
-                if i == frames - 1 { xfadePos += frames }
             }
 
-            // System audio with lowpass filter
-            let sysSample = doMix ? applyFilter(Double(sysBuf[i])) : 0
+            // Scratch overlay (Command key held): mix scratched system audio on top
+            var scratchSample: Double = 0
+            if shouldMixSys {
+                // Smooth scratch rate
+                let rCoeff = abs(scratchRateTarget) > abs(scratchRate) ? 0.3 : 0.05
+                scratchRate += (scratchRateTarget - scratchRate) * rCoeff
 
-            // Mix
-            let mixed = (isMuted ? 0 : synthSample) + sysSample
+                if abs(scratchRate) > 0.001 || abs(scratchRateTarget) > 0.001 {
+                    let overlayRate = 1.0 + scratchRate
+                    scratchReadPos += overlayRate
+                    while scratchReadPos < 0 { scratchReadPos += Double(scratchBufSize) }
+                    while scratchReadPos >= Double(scratchBufSize) { scratchReadPos -= Double(scratchBufSize) }
+
+                    let dist = Double((scratchWritePos - Int(scratchReadPos) + scratchBufSize) % scratchBufSize)
+                    if dist < 512 && overlayRate >= 1.0 {
+                        scratchReadPos = Double((scratchWritePos - 4096 + scratchBufSize) % scratchBufSize)
+                    }
+
+                    let si0 = Int(scratchReadPos) % scratchBufSize
+                    let si1 = (si0 + 1) % scratchBufSize
+                    let sf = scratchReadPos - floor(scratchReadPos)
+                    scratchSample = (Double(scratchBuf[si0]) * (1.0 - sf) + Double(scratchBuf[si1]) * sf) * vol
+                }
+            }
+
+            // Mix synth + scratch overlay
+            let mixed = (isMuted ? 0 : synthSample) + scratchSample
             let clipped = Float(max(-1.0, min(1.0, mixed)))
             data[i] = clipped
 

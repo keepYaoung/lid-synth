@@ -1,4 +1,5 @@
 import SwiftUI
+import QuartzCore
 
 struct ContentView: View {
     @State private var mode: SynthMode = .glide
@@ -23,6 +24,15 @@ struct ContentView: View {
     @State private var midiCC: UInt8 = 1
 
     @State private var prevMidi: Int? = nil
+    @State private var showVinylTip = true
+
+    // Vinyl mode
+    @State private var prevVinylAngle: Double = 90
+    @State private var currentVelocity: Double = 0
+    @State private var sysAudioActive: Bool = false
+    @State private var commandHeld = false
+    @State private var modeBeforeCommand: SynthMode? = nil
+    @State private var eventMonitor: Any? = nil
 
     private let audioEngine = AudioEngine()
     private let midiEngine = MIDIEngine()
@@ -47,25 +57,61 @@ struct ContentView: View {
             audioEngine.start()
             Task { await systemAudio.start() }
 
+            // Command key hold → overlay vinyl scratch on top of current mode
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+                let cmdDown = event.modifierFlags.contains(.command)
+                if cmdDown && !commandHeld {
+                    commandHeld = true
+                    modeBeforeCommand = mode
+                    prevVinylAngle = currentAngle  // sync so first delta isn't huge
+                    // Enable scratch overlay (system audio mix) without changing mode
+                    audioEngine.setMixSystemAudio(true)
+                    audioEngine.setScratchRate(0)
+                    fputs("[CMD] Vinyl overlay ON (mode=\(mode.rawValue))\n", stderr)
+                } else if !cmdDown && commandHeld {
+                    commandHeld = false
+                    // Disable scratch overlay, restore previous state
+                    if let prev = modeBeforeCommand {
+                        audioEngine.setMixSystemAudio(prev == .vinyl)
+                        modeBeforeCommand = nil
+                    }
+                }
+                return event
+            }
         }
         .onDisappear {
             audioEngine.stop()
             systemAudio.stop()
             midiEngine.allNotesOff()
+            if let monitor = eventMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
         }
         .onReceive(timer) { _ in tick() }
         .onChange(of: mode) { _, val in
             audioEngine.setMode(val)
             midiEngine.allNotesOff()
             prevMidi = nil
+            prevVinylAngle = currentAngle
+            // Only vinyl mode uses system audio mixing
+            audioEngine.setMixSystemAudio(val == .vinyl)
         }
-        .onChange(of: instrument) { _, val in audioEngine.setHarmonics(val.harmonics) }
+        .onChange(of: instrument) { _, val in
+            audioEngine.setHarmonics(val.harmonics)
+            audioEngine.setPercType(val)
+        }
         .onChange(of: bpm) { _, val in audioEngine.setBpm(val) }
         .onChange(of: volume) { _, val in audioEngine.setVolume(val) }
-        .onChange(of: synthEnabled) { _, val in audioEngine.setMuted(!val) }
+        .onChange(of: synthEnabled) { _, val in
+            if val {
+                // Immediately set freq from current angle so sound starts instantly
+                let freq = angleToFreqGlide(currentAngle)
+                audioEngine.setTargetFreq(freq)
+            }
+            audioEngine.setMuted(!val)
+        }
         .onChange(of: midiEnabled) { _, val in
             midiEngine.setEnabled(val)
-            audioEngine.setMixSystemAudio(val)
         }
     }
 
@@ -80,7 +126,10 @@ struct ContentView: View {
                 isPlaying: currentFreq > 20,
                 instrument: instrument,
                 vinylSize: discSize,
-                labelSize: discSize * 0.32
+                labelSize: discSize * 0.32,
+                mode: mode,
+                velocity: currentVelocity,
+                scaleType: scaleType
             )
             .position(x: 0, y: height / 2)
         }
@@ -101,6 +150,7 @@ struct ContentView: View {
                 modeSection
                 scaleSection
                 bpmSection
+                velocitySection
                 instrumentSection
                 volumeSection
                 outputSection
@@ -119,7 +169,7 @@ struct ContentView: View {
             Image(systemName: "asterisk")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundColor(.white)
-            Text("hyn*thesizer")
+            Text(L10n.appName)
                 .font(.system(size: 18, weight: .bold, design: .monospaced))
                 .foregroundColor(.white)
             Spacer()
@@ -189,17 +239,45 @@ struct ContentView: View {
     }
 
     private var modeSection: some View {
-        HStack(spacing: 0) {
-            modeButton("Glide", icon: "waveform.path", mode: .glide)
-            modeButton("Scale", icon: "pianokeys", mode: .scale)
-            modeButton("Rhythm", icon: "metronome", mode: .rhythm)
+        VStack(spacing: 6) {
+            HStack(spacing: 0) {
+                modeButton(L10n.modeVinyl, icon: "opticaldisc", mode: .vinyl)
+                modeButton(L10n.modeGlide, icon: "waveform.path", mode: .glide)
+                modeButton(L10n.modeScale, icon: "pianokeys", mode: .scale)
+                modeButton(L10n.modeFader, icon: "slider.vertical.3", mode: .pitchFader)
+                modeButton(L10n.modeRhythm, icon: "metronome", mode: .rhythm)
+            }
+
+            // Tip: show vinyl overlay hint when in non-vinyl modes
+            if mode != .vinyl && showVinylTip {
+                HStack(spacing: 5) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(.cyan.opacity(0.7))
+                    Text(L10n.vinylOverlayTip)
+                        .font(.system(size: 9))
+                        .foregroundColor(.cyan.opacity(0.6))
+                    Spacer()
+                    Button {
+                        showVinylTip = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8))
+                            .foregroundColor(.gray)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 4).fill(.cyan.opacity(0.06)))
+            }
         }
         .padding(.bottom, 12)
     }
 
     @ViewBuilder
     private var scaleSection: some View {
-        if mode != .glide {
+        if mode == .scale || mode == .rhythm || mode == .pitchFader {
             HStack(spacing: 6) {
                 ForEach(ScaleType.allCases) { s in
                     Button(s.rawValue) { scaleType = s }
@@ -231,6 +309,55 @@ struct ContentView: View {
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
                     .foregroundColor(.red)
                     .frame(width: 32)
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var velocitySection: some View {
+        if mode == .vinyl {
+            VStack(spacing: 6) {
+                HStack {
+                    Image(systemName: "gauge.with.needle")
+                        .font(.system(size: 11))
+                        .foregroundColor(.gray)
+                    Text(String(format: "%.0f°/s", currentVelocity))
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundColor(abs(currentVelocity) > kVinylVelocityThreshold ? .orange : .gray)
+                        .frame(width: 80)
+                    Spacer()
+                    Text(currentVelocity > 0 ? "▶" : currentVelocity < 0 ? "◀" : "■")
+                        .font(.system(size: 14))
+                        .foregroundColor(abs(currentVelocity) > kVinylVelocityThreshold ? .orange : .gray.opacity(0.4))
+                    Text(L10n.cmdHold)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.gray.opacity(0.4))
+                }
+
+                // System audio status (updated every tick)
+                if !sysAudioActive {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.yellow)
+                        Text(L10n.sysAudioWarning)
+                            .font(.system(size: 9))
+                            .foregroundColor(.yellow.opacity(0.8))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(.yellow.opacity(0.08)))
+                } else {
+                    HStack(spacing: 6) {
+                        Circle().fill(.green).frame(width: 6, height: 6)
+                        Text(L10n.sysAudioActive)
+                            .font(.system(size: 9))
+                            .foregroundColor(.green.opacity(0.7))
+                        Spacer()
+                    }
+                }
             }
             .padding(.bottom, 8)
         }
@@ -318,12 +445,13 @@ struct ContentView: View {
                     .font(.system(size: 10, weight: .medium))
             }
             .foregroundColor(self.mode == mode ? .white : .gray.opacity(0.5))
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(self.mode == mode ? Color.white.opacity(0.1) : .clear)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -395,10 +523,60 @@ struct ContentView: View {
                 prevMidi = nil
             }
             midiEngine.sendAngleAsCC(angle, controller: midiCC)
+
+        case .pitchFader:
+            if let midi = angleToMidiFader(angle, scale: scaleType, prevMidi: prevMidi) {
+                let freq = midiToFreq(midi)
+                audioEngine.setTargetFreq(freq)
+                currentFreq = freq
+                if midi != prevMidi {
+                    audioEngine.triggerNote()
+                    midiEngine.sendNoteOn(UInt8(clamping: midi))
+                }
+                prevMidi = midi
+            } else {
+                audioEngine.setTargetFreq(0)
+                audioEngine.releaseNote()
+                midiEngine.sendNoteOff()
+                currentFreq = 0
+                prevMidi = nil
+            }
+            midiEngine.sendAngleAsCC(angle, controller: midiCC)
+
+        case .vinyl:
+            // Delta-based scratch with dead zone for tremor prevention
+            let delta = angle - prevVinylAngle
+            prevVinylAngle = angle
+            currentVelocity = delta / 0.04  // approximate deg/s for display
+
+            // Dead zone: ignore changes < 0.8° per tick (tremor filter)
+            if abs(delta) > 0.8 {
+                // Map delta to scratch rate: 1° → 1.5x speed shift
+                let rate = delta * 1.5
+                audioEngine.setScratchRate(rate)
+            } else {
+                audioEngine.setScratchRate(0)
+            }
+
+            // Send as MIDI CC
+            let ccVal = UInt8(min(127, abs(delta) / 5.0 * 127.0))
+            midiEngine.sendCC(controller: midiCC, value: ccVal)
+        }
+
+        // Command held overlay: scratch on top of current mode
+        if commandHeld && mode != .vinyl {
+            let delta = angle - prevVinylAngle
+            prevVinylAngle = angle
+            if abs(delta) > 0.5 {
+                audioEngine.setScratchRate(delta * 2.0)
+            } else {
+                audioEngine.setScratchRate(0)
+            }
         }
 
         currentNote = freqToNote(currentFreq)
         waveform = audioEngine.copyWaveform()
+        sysAudioActive = systemAudio.isCapturing
 
         if audioEngine.consumeBeatFlash() {
             beatFlash = true
