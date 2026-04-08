@@ -8,6 +8,7 @@ struct LidSynthApp: App {
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 480, height: 820)
+        .windowResizability(.automatic)
+        .defaultSize(width: 1200, height: 720)
     }
 }
