@@ -25,14 +25,14 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
     private(set) var isCapturing = false
 
     // Ring buffer (audio thread safe - fixed C buffer)
-    private let bufSize = 8192
+    private let bufSize = 32768
     private let ringBuf: UnsafeMutablePointer<Float>
     private var writePos: Int = 0
     private var readPos: Int = 0
 
     override init() {
-        ringBuf = .allocate(capacity: 8192)
-        ringBuf.initialize(repeating: 0, count: 8192)
+        ringBuf = .allocate(capacity: 32768)
+        ringBuf.initialize(repeating: 0, count: 32768)
         super.init()
     }
 

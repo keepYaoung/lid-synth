@@ -59,18 +59,17 @@ struct ContentView: View {
 
             // Command key hold → overlay vinyl scratch on top of current mode
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+                // Command overlay only works in non-vinyl modes
+                guard mode != .vinyl else { return event }
                 let cmdDown = event.modifierFlags.contains(.command)
                 if cmdDown && !commandHeld {
                     commandHeld = true
                     modeBeforeCommand = mode
-                    prevVinylAngle = currentAngle  // sync so first delta isn't huge
-                    // Enable scratch overlay (system audio mix) without changing mode
+                    prevVinylAngle = currentAngle
                     audioEngine.setMixSystemAudio(true)
                     audioEngine.setScratchRate(0)
-                    fputs("[CMD] Vinyl overlay ON (mode=\(mode.rawValue))\n", stderr)
                 } else if !cmdDown && commandHeld {
                     commandHeld = false
-                    // Disable scratch overlay, restore previous state
                     if let prev = modeBeforeCommand {
                         audioEngine.setMixSystemAudio(prev == .vinyl)
                         modeBeforeCommand = nil
@@ -552,7 +551,7 @@ struct ContentView: View {
             // Dead zone: ignore changes < 0.8° per tick (tremor filter)
             if abs(delta) > 0.6 {
                 // Map delta to scratch rate: 1° → 3.5x speed shift
-                let rate = delta * 3.5
+                let rate = delta * 0.15
                 audioEngine.setScratchRate(rate)
             } else {
                 audioEngine.setScratchRate(0)
@@ -568,7 +567,7 @@ struct ContentView: View {
             let delta = angle - prevVinylAngle
             prevVinylAngle = angle
             if abs(delta) > 0.6 {
-                audioEngine.setScratchRate(delta * 3.5)
+                audioEngine.setScratchRate(delta * 0.15)
             } else {
                 audioEngine.setScratchRate(0)
             }

@@ -80,7 +80,8 @@ final class AudioEngine {
     private var scratchReadPos: Double = 0
     // Shared scratch state
     private var scratchRateTarget: Double = 0  // set from main thread
-    private var scratchRate: Double = 0        // smoothed on audio thread
+    private var scratchRate: Double = 0
+    private var scratchDebugCount: Int = 0        // smoothed on audio thread
     private var scratchEnvLevel: Double = 0
 
     // Temp buffer for system audio read
@@ -180,7 +181,8 @@ final class AudioEngine {
         scratchEnvLevel = 0
         scratchPhase = 0
         if m == .vinyl {
-            scratchReadPos = Double((scratchWritePos + scratchBufSize - 4096) % scratchBufSize)
+            // Start reading ~23ms behind write position (minimal delay)
+            scratchReadPos = Double((scratchWritePos + scratchBufSize - 1024) % scratchBufSize)
         }
     }
 
@@ -301,41 +303,58 @@ final class AudioEngine {
 
         // ── Vinyl mode: scratch ──
         if currentMode == .vinyl {
-            // Smooth scratch rate: very fast attack, moderate decay
-            let rateTarget = scratchRateTarget
-            let rateCoeff = abs(rateTarget) > abs(scratchRate) ? 0.5 : 0.08
-            scratchRate += (rateTarget - scratchRate) * rateCoeff
+            // Direct scratch rate — no smoothing for immediate direction change
+            scratchRate = scratchRateTarget
 
             let useSysAudio = systemAudio?.isCapturing ?? false
             let isScratching = abs(scratchRate) > 0.01
-            // Min envelope 0.3 so sound starts strong, max 1.0 when scratching
-            let targetEnv: Double = isScratching ? 1.0 : 0.3
-            let envCoeff: Double = isScratching ? 0.25 : 0.012  // fast attack, smooth tail
+            // Debug: log which path every 500 blocks
+            scratchDebugCount += 1
+            if scratchDebugCount % 500 == 0 && isScratching {
+                // Check if scratchBuf has actual audio data
+                var maxVal: Float = 0
+                for j in 0..<min(512, scratchBufSize) {
+                    let v = abs(scratchBuf[(scratchWritePos - 512 + j + scratchBufSize) % scratchBufSize])
+                    if v > maxVal { maxVal = v }
+                }
+                fputs("[Vinyl] sysAudio=\(useSysAudio) rate=\(String(format:"%.2f", scratchRate)) wPos=\(scratchWritePos) rPos=\(Int(scratchReadPos)) bufMax=\(String(format:"%.4f", maxVal))\n", stderr)
+            }
+            // Only output when scratching — system audio already plays through speakers
+            let targetEnv: Double = isScratching ? 1.0 : 0.0
+            let envCoeff: Double = isScratching ? 0.3 : 0.015  // very fast attack, smooth tail
 
             if useSysAudio {
-                // ── System audio scratch: DJ-style record scrubbing ──
-                // Read fresh audio into ring buffer
+                // ── System audio DJ mode ──
+                // Always capture into ring buffer
                 _ = systemAudio!.readSamples(into: sysBuf, count: frames)
                 for i in 0..<frames {
                     scratchBuf[scratchWritePos] = sysBuf[i]
                     scratchWritePos = (scratchWritePos + 1) % scratchBufSize
                 }
 
-                // rate: 1.0 = normal playback, + scratchRate shifts speed/direction
-                let rate = 1.0 + scratchRate
-                let sEnv: Double = isScratching ? 1.0 : 0.7  // quieter when not scratching
+                // Scratch envelope: smooth fade in/out to avoid clicks
+                let envTarget: Double = isScratching ? 1.0 : 0.0
+                let rate = isScratching ? scratchRate : 0.0
 
                 for i in 0..<frames {
-                    scratchEnvLevel += (sEnv - scratchEnvLevel) * 0.05
+                    // Smooth envelope (no clicks on start/stop)
+                    scratchEnvLevel += (envTarget - scratchEnvLevel) * 0.005
 
-                    scratchReadPos += rate
+                    // Always advance readPos (don't jump/reset)
+                    if isScratching {
+                        scratchReadPos += rate
+                    }
+                    // When not scratching, readPos stays put (frozen, like lifting hand off record)
+
                     while scratchReadPos < 0 { scratchReadPos += Double(scratchBufSize) }
                     while scratchReadPos >= Double(scratchBufSize) { scratchReadPos -= Double(scratchBufSize) }
 
-                    // Stay behind write head
-                    let dist = Double((scratchWritePos - Int(scratchReadPos) + scratchBufSize) % scratchBufSize)
-                    if dist < 512 && rate >= 1.0 {
-                        scratchReadPos = Double((scratchWritePos - 4096 + scratchBufSize) % scratchBufSize)
+                    // Only guard against overrunning write head when going forward
+                    if rate > 0 {
+                        let dist = Double((scratchWritePos - Int(scratchReadPos) + scratchBufSize) % scratchBufSize)
+                        if dist < 1024 {
+                            scratchReadPos = Double((scratchWritePos - 4096 + scratchBufSize) % scratchBufSize)
+                        }
                     }
 
                     let idx0 = Int(scratchReadPos) % scratchBufSize
@@ -343,7 +362,7 @@ final class AudioEngine {
                     let frac = scratchReadPos - floor(scratchReadPos)
                     let sample = Double(scratchBuf[idx0]) * (1.0 - frac) + Double(scratchBuf[idx1]) * frac
 
-                    let out = sample * scratchEnvLevel * vol
+                    let out = sample * scratchEnvLevel * vol * 3.0
                     let clipped = Float(max(-1.0, min(1.0, out)))
                     data[i] = clipped
                     waveBuf[(waveBufPos + i) % waveBufSize] = clipped
@@ -351,7 +370,7 @@ final class AudioEngine {
             } else {
                 // ── Wavetable fallback: scratch instrument waveform ──
                 let baseAdvance = 220.0 * Double(scratchWaveLen) / kSampleRate
-                let rate = baseAdvance * (1.0 + scratchRate)
+                let rate = baseAdvance * scratchRate  // pure scratch, no base playback
                 let wLen = scratchWaveLen
 
                 for i in 0..<frames {
@@ -513,14 +532,14 @@ final class AudioEngine {
                 scratchRate += (scratchRateTarget - scratchRate) * rCoeff
 
                 if abs(scratchRate) > 0.001 || abs(scratchRateTarget) > 0.001 {
-                    let overlayRate = 1.0 + scratchRate
+                    let overlayRate = scratchRate  // pure scratch
                     scratchReadPos += overlayRate
                     while scratchReadPos < 0 { scratchReadPos += Double(scratchBufSize) }
                     while scratchReadPos >= Double(scratchBufSize) { scratchReadPos -= Double(scratchBufSize) }
 
                     let dist = Double((scratchWritePos - Int(scratchReadPos) + scratchBufSize) % scratchBufSize)
-                    if dist < 512 && overlayRate >= 1.0 {
-                        scratchReadPos = Double((scratchWritePos - 4096 + scratchBufSize) % scratchBufSize)
+                    if dist < 512 && overlayRate > 0 {
+                        scratchReadPos = Double((scratchWritePos - 1024 + scratchBufSize) % scratchBufSize)
                     }
 
                     let si0 = Int(scratchReadPos) % scratchBufSize
