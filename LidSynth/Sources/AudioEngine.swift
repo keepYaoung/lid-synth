@@ -350,7 +350,7 @@ final class AudioEngine {
                         let frac = scratchReadPos - floor(scratchReadPos)
                         let sample = Double(scratchBuf[idx0]) * (1.0 - frac) + Double(scratchBuf[idx1]) * frac
 
-                        let out = sample * scratchEnvLevel * 12.0  // 3x boosted scratch
+                        let out = sample * scratchEnvLevel * 3.0  // 3x boosted scratch
                         data[i] = Float(max(-1.0, min(1.0, out)))
                         waveBuf[(waveBufPos + i) % waveBufSize] = data[i]
                     }
@@ -359,7 +359,7 @@ final class AudioEngine {
                     for i in 0..<frames {
                         scratchEnvLevel *= 0.997
                         let idx0 = Int(scratchReadPos) % scratchBufSize
-                        let sample = Double(scratchBuf[idx0]) * scratchEnvLevel * 12.0
+                        let sample = Double(scratchBuf[idx0]) * scratchEnvLevel * 3.0
                         data[i] = Float(max(-1.0, min(1.0, sample)))
                         waveBuf[(waveBufPos + i) % waveBufSize] = data[i]
                     }
