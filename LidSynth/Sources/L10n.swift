@@ -42,7 +42,7 @@ enum L10n {
     }
 
     // MARK: - Header
-    static var appName: String { "hyn*thesizer" }
+    static var appName: String { "hynthesizer" }
     static var cmdHold: String { "⌘ hold" }
 
     // MARK: - Helpers
