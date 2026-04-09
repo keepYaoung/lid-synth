@@ -1,54 +1,59 @@
 # hyn*thesizer
 
-맥북 덮개 각도로 연주하는 신디사이저.
+A synthesizer you play by opening and closing your MacBook lid.
 
-힌지를 열고 닫으면 피치가 바뀌고, LP 레코드가 회전하며, 시스템 오디오에 필터를 걸 수 있습니다.
+Tilt the hinge to change pitch, spin a virtual vinyl record, scratch system audio, and apply filters — all controlled by the lid angle.
 
-## 기능
+## Features
 
-### 3가지 연주 모드
-- **Glide** - 테레민처럼 연속 피치 변화
-- **Scale** - 음계 스텝 + ADSR 엔벨로프 (Pentatonic / Major / Minor / Blues)
-- **Rhythm** - BPM 클럭에 맞춰 자동 트리거 (40~240 BPM)
+### 5 Performance Modes
+- **Vinyl** — Scratch system audio or a wavetable by opening/closing the lid. Hold Command to overlay scratch on any other mode.
+- **Glide** — Continuous pitch change like a theremin
+- **Scale** — Quantized scale steps with ADSR envelope (Pentatonic / Major / Minor / Blues)
+- **Pitch Fader** — Snap-to-note fader with hysteresis for stable transitions
+- **Rhythm** — Auto-trigger notes synced to a BPM clock (40–240 BPM)
 
-### 5가지 악기 음색
-Theremin, Flute, Organ, String, Brass (가법 합성, 하모닉스 기반)
+### 8 Instruments
+- **Melodic:** Theremin, Flute, Organ, String, Brass (additive synthesis with harmonics)
+- **Percussion:** Kick, Snare, Hi-Hat (one-shot synthesis)
 
-### LP 바이닐 UI
-- 힌지 각도에 따라 LP가 실시간 회전
-- 톤암이 각도에 맞춰 이동
-- 레드 레이블에 현재 음정/악기/주파수 표시
-- 실시간 웨이브폼 시각화
+### Vinyl Record UI
+- LP disc rotates in real time based on hinge angle
+- Tone arm follows the angle position
+- Red label displays current note, instrument, and frequency
+- Real-time waveform visualization
+- Velocity indicator with direction and spark effects
 
-### MIDI 출력
-가상 MIDI 포트 "LidSynth"를 생성하여 DAW(Ableton, Logic, GarageBand 등)에서 인식 가능.
-- Note On/Off (Scale/Rhythm 모드)
-- CC 전송 (Mod Wheel / Volume / Expression / Filter)
-- 힌지 각도 → MIDI CC 값 (0-127) 매핑
+### MIDI Output
+Creates a virtual MIDI port "LidSynth" recognized by any DAW (Ableton, Logic, GarageBand, etc.).
+- Note On/Off (Scale / Rhythm / Pitch Fader modes)
+- CC messages (Mod Wheel / Volume / Expression / Filter) with deduplication
+- Hinge angle mapped to MIDI CC values (0–127)
 
-### 시스템 오디오 믹싱
-ScreenCaptureKit으로 맥에서 재생 중인 음악을 캡처하여 믹싱.
-- 힌지 각도로 로우패스 필터 cutoff 조절 (닫으면 먹먹, 열면 선명)
-- 신스 사운드와 동시 믹스 가능
+### System Audio Mixing
+Captures audio playing on your Mac via ScreenCaptureKit.
+- Lowpass filter controlled by hinge angle (closed = muffled, open = bright)
+- Mix synth sound on top of system audio
+- Vinyl mode scratches the captured system audio directly
 
-### Output 조합
+### Output Combinations
 
-| Synth | MIDI | 동작 |
-|-------|------|------|
-| ON | ON | 신스 + 시스템 오디오 믹스 |
-| OFF | ON | 시스템 오디오에 힌지 필터 적용 |
-| ON | OFF | 신스만 |
-| OFF | OFF | 무음 (시작 기본값) |
+| Synth | MIDI | Behavior |
+|-------|------|----------|
+| ON | ON | Synth + system audio mix |
+| OFF | ON | Hinge filter applied to system audio |
+| ON | OFF | Synth only |
+| OFF | OFF | Silent (default on launch) |
 
-## 요구사항
+## Requirements
 
 - macOS 14.0+
 - Swift 5.9+
 
-### macOS 권한
-- **화면 녹화** - 시스템 오디오 캡처 시 필요 (시스템 설정 > 개인정보 보호 > 화면 녹화)
+### macOS Permissions
+- **Screen Recording** — Required for system audio capture (System Settings > Privacy & Security > Screen Recording)
 
-## 빌드 및 실행
+## Build & Run
 
 ```bash
 cd LidSynth
@@ -56,27 +61,27 @@ swift build
 .build/debug/LidSynth
 ```
 
-## 구조
+## Project Structure
 
 ```
 hynthesizer/
-├── lid_synth.py                 # Python 원본 (tkinter)
-├── LidSynth/                    # Swift macOS 앱
+├── lid_synth.py                     # Original Python prototype (tkinter)
+├── LidSynth/                        # Swift macOS app
 │   ├── Package.swift
 │   └── Sources/
-│       ├── LidSynthApp.swift    # 앱 진입점
-│       ├── ContentView.swift    # 메인 UI + 로직
-│       ├── VinylView.swift      # LP 레코드 + 톤암
-│       ├── WaveformView.swift   # 실시간 파형
-│       ├── GaugeView.swift      # 반원형 게이지
-│       ├── AudioEngine.swift    # 가법 합성 + ADSR + 믹싱
-│       ├── MIDIEngine.swift     # CoreMIDI 가상 포트
-│       ├── LidSensor.swift      # IOKit HID 네이티브 센서
-│       ├── SystemAudioCapture.swift  # ScreenCaptureKit
-│       └── Models.swift         # 상수, 음계, 악기, 유틸
+│       ├── LidSynthApp.swift        # App entry point
+│       ├── ContentView.swift        # Main UI + mode logic
+│       ├── VinylView.swift          # Vinyl disc + tone arm animation
+│       ├── WaveformView.swift       # Real-time waveform display
+│       ├── AudioEngine.swift        # Additive synthesis + ADSR + mixing
+│       ├── MIDIEngine.swift         # CoreMIDI virtual port
+│       ├── LidSensor.swift          # IOKit HID hinge sensor driver
+│       ├── SystemAudioCapture.swift # ScreenCaptureKit audio capture
+│       ├── Models.swift             # Constants, scales, instruments, helpers
+│       └── L10n.swift               # Localization (Ko / En / Ja)
 └── README.md
 ```
 
-## 라이선스
+## License
 
 MIT
