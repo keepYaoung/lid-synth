@@ -9,11 +9,28 @@ let kBaseMidi: Int = 48 // C3
 
 // MARK: - Synth Mode
 enum SynthMode: String, CaseIterable, Identifiable {
+    case vinyl      = "Vinyl"
+    case filter     = "Filter"
     case glide      = "Glide"
     case scale      = "Scale"
     case pitchFader = "Fader"
     case rhythm     = "Rhythm"
-    case vinyl      = "Vinyl"
+    var id: String { rawValue }
+}
+
+// MARK: - Audio Source
+enum AudioSource: String, CaseIterable, Identifiable {
+    case system = "System"
+    case file   = "File"
+    case mic    = "Mic"
+    var id: String { rawValue }
+}
+
+// MARK: - Filter Type
+enum FilterType: String, CaseIterable, Identifiable {
+    case lowPass  = "Low-Pass"
+    case bandPass = "Band-Pass"
+    case highPass = "High-Pass"
     var id: String { rawValue }
 }
 
@@ -73,6 +90,14 @@ enum InstrumentType: String, CaseIterable, Identifiable {
 enum EnvPhase {
     case idle, attack, decay, sustain, release
 }
+
+// MARK: - Scratch State (CDJ jog wheel model)
+enum ScratchState {
+    case playing    // normal forward playback (platter spinning)
+    case scratching // playhead follows hinge movement (hand on platter)
+}
+
+let kScratchMultiplier: Double = 0.18  // degrees/tick → playback rate mapping
 
 // MARK: - Fader / Vinyl Constants
 let kFaderHysteresis: Double = 2.0        // degrees of dead zone at note boundaries

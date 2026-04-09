@@ -2,7 +2,7 @@ import SwiftUI
 import QuartzCore
 
 struct ContentView: View {
-    @State private var mode: SynthMode = .glide
+    @State private var mode: SynthMode = .vinyl
     @State private var scaleType: ScaleType = .pentatonic
     @State private var instrument: InstrumentType = .theremin
     @State private var volume: Double = 0.22
@@ -26,10 +26,23 @@ struct ContentView: View {
     @State private var prevMidi: Int? = nil
     @State private var showVinylTip = true
 
-    // Vinyl mode
+    // Filter mode
+    @State private var filterType: FilterType = .lowPass
+    @State private var compressorEnabled = false
+    @State private var filterCutoffDisplay: Double = 1000
+
+    // Audio source
+    @State private var audioSource: AudioSource = .system
+    @State private var loadedFileName: String? = nil
+    @State private var isPlaying = false
+
+    // Vinyl mode (CDJ state machine)
     @State private var prevVinylAngle: Double = 90
     @State private var currentVelocity: Double = 0
-    @State private var sysAudioActive: Bool = false
+    @State private var sourceActive: Bool = false
+    @State private var vinylState: ScratchState = .playing
+    @State private var stillTickCount: Int = 0
+    private let kScratchReleaseTicks = 3  // 120ms debounce
     @State private var commandHeld = false
     @State private var modeBeforeCommand: SynthMode? = nil
     @State private var eventMonitor: Any? = nil
@@ -37,7 +50,7 @@ struct ContentView: View {
     private let audioEngine = AudioEngine()
     private let midiEngine = MIDIEngine()
     private let sensor = LidSensor()
-    private let systemAudio = SystemAudioCapture()
+    private let audioSourceManager = AudioSourceManager()
     private let timer = Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -53,15 +66,15 @@ struct ContentView: View {
         .frame(minWidth: 800, maxWidth: .infinity, minHeight: 500, maxHeight: .infinity)
         .background(Color(white: 0.04))
         .onAppear {
-            audioEngine.systemAudio = systemAudio
+            audioEngine.audioSource = audioSourceManager
             audioEngine.start()
-            Task { await systemAudio.start() }
+            Task { await audioSourceManager.start() }
 
             // Command key hold → overlay vinyl scratch on top of current mode
             guard eventMonitor == nil else { return }
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
                 // Command overlay only works in non-vinyl modes
-                guard mode != .vinyl else { return event }
+                guard mode != .vinyl && mode != .filter else { return event }
                 let cmdDown = event.modifierFlags.contains(.command)
                 if cmdDown && !commandHeld {
                     commandHeld = true
@@ -81,7 +94,7 @@ struct ContentView: View {
         }
         .onDisappear {
             audioEngine.stop()
-            systemAudio.stop()
+            audioSourceManager.stop()
             midiEngine.allNotesOff()
             if let monitor = eventMonitor {
                 NSEvent.removeMonitor(monitor)
@@ -89,17 +102,20 @@ struct ContentView: View {
         }
         .onReceive(timer) { _ in tick() }
         .onChange(of: mode) { _, val in
-            audioEngine.setMode(val)
-            midiEngine.allNotesOff()
-            prevMidi = nil
-            prevVinylAngle = currentAngle
-            // Only vinyl mode uses system audio mixing
-            audioEngine.setMixSystemAudio(val == .vinyl)
-            // Sync freq immediately so sound works right after mode switch
+            // Set freq BEFORE setMode so smoothFreq syncs correctly
             if val == .glide {
                 let freq = angleToFreqGlide(currentAngle)
                 audioEngine.setTargetFreq(freq)
             }
+            audioEngine.setMode(val)
+            midiEngine.allNotesOff()
+            prevMidi = nil
+            prevVinylAngle = currentAngle
+            isPlaying = false
+            vinylState = .playing
+            stillTickCount = 0
+            // Vinyl and Filter modes use system audio
+            audioEngine.setMixSystemAudio(val == .vinyl || val == .filter)
         }
         .onChange(of: instrument) { _, val in
             audioEngine.setHarmonics(val.harmonics)
@@ -127,6 +143,12 @@ struct ContentView: View {
         }
         .onChange(of: midiEnabled) { _, val in
             midiEngine.setEnabled(val)
+        }
+        .onChange(of: filterType) { _, val in
+            audioEngine.setFilterType(val)
+        }
+        .onChange(of: compressorEnabled) { _, val in
+            audioEngine.setCompressorEnabled(val)
         }
     }
 
@@ -163,9 +185,11 @@ struct ContentView: View {
                 angleSliderSection
                 divider
                 modeSection
+                audioSourceSection
                 scaleSection
                 bpmSection
                 velocitySection
+                filterSection
                 instrumentSection
                 volumeSection
                 outputSection
@@ -199,7 +223,7 @@ struct ContentView: View {
                 Text(currentNote)
                     .font(.system(size: 36, weight: .bold, design: .monospaced))
                     .foregroundColor(.white)
-                Text("\(instrument.rawValue) · \(mode.rawValue)")
+                Text(mode == .filter ? "\(filterType.rawValue) · \(mode.rawValue)" : "\(instrument.rawValue) · \(mode.rawValue)")
                     .font(.system(size: 14))
                     .foregroundColor(.gray)
             }
@@ -261,6 +285,7 @@ struct ContentView: View {
                 modeButton(L10n.modeScale, icon: "pianokeys", mode: .scale)
                 modeButton(L10n.modeFader, icon: "slider.vertical.3", mode: .pitchFader)
                 modeButton(L10n.modeRhythm, icon: "metronome", mode: .rhythm)
+                modeButton(L10n.modeFilter, icon: "line.3.horizontal.decrease", mode: .filter)
             }
 
             // Tip: show vinyl overlay hint when in non-vinyl modes
@@ -288,6 +313,151 @@ struct ContentView: View {
             }
         }
         .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private var audioSourceSection: some View {
+        if mode == .vinyl || mode == .filter {
+            VStack(spacing: 8) {
+                // Source selector
+                HStack(spacing: 6) {
+                    ForEach(AudioSource.allCases) { src in
+                        Button {
+                            selectAudioSource(src)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: audioSourceIcon(src))
+                                    .font(.system(size: 10))
+                                Text(audioSourceLabel(src))
+                                    .font(.system(size: 11, weight: src == audioSource ? .bold : .regular))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule().fill(src == audioSource ? Color.orange.opacity(0.7) : Color.white.opacity(0.06))
+                            )
+                            .foregroundColor(src == audioSource ? .white : .gray)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer()
+                }
+
+                // Source-specific status
+                switch audioSource {
+                case .system:
+                    if sourceActive {
+                        HStack(spacing: 6) {
+                            Circle().fill(.green).frame(width: 6, height: 6)
+                            Text(L10n.sysAudioActive)
+                                .font(.system(size: 9))
+                                .foregroundColor(.green.opacity(0.7))
+                            Spacer()
+                        }
+                    } else {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.yellow)
+                            Text(L10n.sysAudioWarning)
+                                .font(.system(size: 9))
+                                .foregroundColor(.yellow.opacity(0.8))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 4).fill(.yellow.opacity(0.08)))
+                    }
+                case .file:
+                    VStack(spacing: 6) {
+                        HStack(spacing: 8) {
+                            Button {
+                                openFilePicker()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "folder.fill")
+                                        .font(.system(size: 10))
+                                    Text(L10n.loadFile)
+                                        .font(.system(size: 11, weight: .medium))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Color.white.opacity(0.08)))
+                                .foregroundColor(.white)
+                            }
+                            .buttonStyle(.plain)
+
+                            if let name = loadedFileName {
+                                HStack(spacing: 4) {
+                                    Image(systemName: sourceActive ? "waveform" : "waveform.slash")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(sourceActive ? .orange : .gray)
+                                    Text(name)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.orange.opacity(0.8))
+                                        .lineLimit(1)
+                                }
+                            } else {
+                                Text(L10n.noFileLoaded)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.gray.opacity(0.5))
+                            }
+                            Spacer()
+                        }
+
+                        // Play/Pause button (turntable control)
+                        if loadedFileName != nil && sourceActive {
+                            HStack(spacing: 10) {
+                                Button {
+                                    isPlaying.toggle()
+                                    if isPlaying {
+                                        vinylState = .playing
+                                        audioEngine.setScratchState(.playing)
+                                    } else {
+                                        vinylState = .scratching
+                                        audioEngine.setScratchState(.scratching)
+                                        audioEngine.setScratchAdvance(0)
+                                    }
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                            .font(.system(size: 12))
+                                        Text(isPlaying ? L10n.pause : L10n.play)
+                                            .font(.system(size: 11, weight: .bold))
+                                    }
+                                    .foregroundColor(isPlaying ? .orange : .white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(isPlaying ? Color.orange.opacity(0.15) : Color.white.opacity(0.1))
+                                    )
+                                }
+                                .buttonStyle(.plain)
+
+                                if isPlaying && mode == .vinyl {
+                                    Text(L10n.turntableHint)
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.orange.opacity(0.5))
+                                }
+                                Spacer()
+                            }
+                        }
+                    }
+                case .mic:
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(sourceActive ? .red : .gray.opacity(0.3))
+                            .frame(width: 6, height: 6)
+                        Text(sourceActive ? L10n.micRecording : L10n.micInactive)
+                            .font(.system(size: 9))
+                            .foregroundColor(sourceActive ? .red.opacity(0.8) : .gray.opacity(0.5))
+                        Spacer()
+                    }
+                }
+            }
+            .padding(.bottom, 8)
+        }
     }
 
     @ViewBuilder
@@ -332,47 +502,76 @@ struct ContentView: View {
     @ViewBuilder
     private var velocitySection: some View {
         if mode == .vinyl {
-            VStack(spacing: 6) {
-                HStack {
-                    Image(systemName: "gauge.with.needle")
-                        .font(.system(size: 11))
-                        .foregroundColor(.gray)
-                    Text(String(format: "%.0f°/s", currentVelocity))
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundColor(abs(currentVelocity) > kVinylVelocityThreshold ? .orange : .gray)
-                        .frame(width: 80)
+            HStack {
+                Image(systemName: "gauge.with.needle")
+                    .font(.system(size: 11))
+                    .foregroundColor(.gray)
+                Text(String(format: "%.0f°/s", currentVelocity))
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundColor(abs(currentVelocity) > kVinylVelocityThreshold ? .orange : .gray)
+                    .frame(width: 80)
+                Spacer()
+                Text(currentVelocity > 0 ? "▶" : currentVelocity < 0 ? "◀" : "■")
+                    .font(.system(size: 14))
+                    .foregroundColor(abs(currentVelocity) > kVinylVelocityThreshold ? .orange : .gray.opacity(0.4))
+                Text(L10n.cmdHold)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.gray.opacity(0.4))
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var filterSection: some View {
+        if mode == .filter {
+            VStack(spacing: 8) {
+                // Filter type selector
+                HStack(spacing: 6) {
+                    ForEach(FilterType.allCases) { ft in
+                        Button(ft.rawValue) { filterType = ft }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: ft == filterType ? .bold : .regular))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule().fill(ft == filterType ? Color.purple.opacity(0.7) : Color.white.opacity(0.06))
+                            )
+                            .foregroundColor(ft == filterType ? .white : .gray)
+                    }
                     Spacer()
-                    Text(currentVelocity > 0 ? "▶" : currentVelocity < 0 ? "◀" : "■")
-                        .font(.system(size: 14))
-                        .foregroundColor(abs(currentVelocity) > kVinylVelocityThreshold ? .orange : .gray.opacity(0.4))
-                    Text(L10n.cmdHold)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(.gray.opacity(0.4))
                 }
 
-                // System audio status (updated every tick)
-                if !sysAudioActive {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(.yellow)
-                        Text(L10n.sysAudioWarning)
-                            .font(.system(size: 9))
-                            .foregroundColor(.yellow.opacity(0.8))
-                        Spacer()
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(.yellow.opacity(0.08)))
-                } else {
-                    HStack(spacing: 6) {
-                        Circle().fill(.green).frame(width: 6, height: 6)
-                        Text(L10n.sysAudioActive)
-                            .font(.system(size: 9))
-                            .foregroundColor(.green.opacity(0.7))
-                        Spacer()
-                    }
+                // Cutoff display
+                HStack {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 11))
+                        .foregroundColor(.purple.opacity(0.7))
+                    Text(L10n.filterCutoff)
+                        .font(.system(size: 11))
+                        .foregroundColor(.gray)
+                    Spacer()
+                    Text(String(format: "%.0f Hz", filterCutoffDisplay))
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundColor(.purple)
                 }
+
+                // Compressor toggle
+                HStack {
+                    Toggle(isOn: $compressorEnabled) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.down.right.and.arrow.up.left")
+                                .font(.system(size: 10))
+                            Text(L10n.compressor)
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundColor(compressorEnabled ? .purple : .gray.opacity(0.4))
+                    }
+                    .toggleStyle(.switch)
+                    .tint(.purple)
+                    Spacer()
+                }
+
             }
             .padding(.bottom, 8)
         }
@@ -499,6 +698,59 @@ struct ContentView: View {
         .background(RoundedRectangle(cornerRadius: 4).fill(.green.opacity(0.06)))
     }
 
+    // MARK: - Audio Source Helpers
+
+    private func audioSourceIcon(_ source: AudioSource) -> String {
+        switch source {
+        case .system: "display"
+        case .file:   "doc.fill"
+        case .mic:    "mic.fill"
+        }
+    }
+
+    private func audioSourceLabel(_ source: AudioSource) -> String {
+        switch source {
+        case .system: L10n.sourceSystem
+        case .file:   L10n.sourceFile
+        case .mic:    L10n.sourceMic
+        }
+    }
+
+    private func selectAudioSource(_ source: AudioSource) {
+        audioSource = source
+        isPlaying = false
+        vinylState = .playing
+        stillTickCount = 0
+        audioEngine.setScratchState(.scratching)
+        audioEngine.setScratchAdvance(0)
+        Task { await audioSourceManager.switchSource(source) }
+    }
+
+    private func openFilePicker() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            .audio, .mp3, .wav, .aiff,
+            .init(filenameExtension: "m4a")!,
+            .init(filenameExtension: "flac")!
+        ]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = L10n.filePickerMessage
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try audioSourceManager.loadFile(url: url)
+                loadedFileName = url.lastPathComponent
+                // Auto-switch to file source and start playback
+                if audioSource != .file {
+                    audioSource = .file
+                }
+                Task { await audioSourceManager.switchSource(.file) }
+            } catch {
+                fputs("[File] Load failed: \(error)\n", stderr)
+            }
+        }
+    }
+
     // MARK: - Tick
 
     private func tick() {
@@ -557,22 +809,41 @@ struct ContentView: View {
             }
             midiEngine.sendAngleAsCC(angle, controller: midiCC)
 
+        case .filter:
+            // Filter mode: display cutoff frequency
+            let r = max(0, min(angle, 180)) / 180.0
+            let cutoff = 200.0 * pow(100.0, r)
+            filterCutoffDisplay = min(cutoff, 20000)
+            currentFreq = filterCutoffDisplay
+            midiEngine.sendAngleAsCC(angle, controller: midiCC)
+
         case .vinyl:
-            // Delta-based scratch with dead zone for tremor prevention
+            // CDJ jog wheel: two states — PLAYING or SCRATCHING
             let delta = angle - prevVinylAngle
             prevVinylAngle = angle
-            currentVelocity = delta / 0.04  // approximate deg/s for display
+            currentVelocity = delta / 0.04  // deg/s for display
 
-            // Dead zone: ignore changes < 0.8° per tick (tremor filter)
-            if abs(delta) > kVinylDeadZone {
-                // Map delta to scratch rate: 1° → 3.5x speed shift
-                let rate = delta * 0.15
-                audioEngine.setScratchRate(rate)
-            } else {
-                audioEngine.setScratchRate(0)
+            if abs(delta) > kVinylDeadZone && isPlaying {
+                // Hinge moving + playing → SCRATCHING: playhead follows hand
+                stillTickCount = 0
+                if vinylState != .scratching {
+                    vinylState = .scratching
+                    audioEngine.setScratchState(.scratching)
+                }
+                audioEngine.setScratchAdvance(-delta * kScratchMultiplier)
+            } else if isPlaying {
+                // Hinge still + playing
+                stillTickCount += 1
+                if vinylState == .scratching {
+                    audioEngine.setScratchAdvance(0)
+                    if stillTickCount >= kScratchReleaseTicks {
+                        vinylState = .playing
+                        audioEngine.setScratchState(.playing)
+                    }
+                }
             }
 
-            // Send as MIDI CC
+            // MIDI CC
             let ccVal = UInt8(min(127, abs(delta) / 5.0 * 127.0))
             midiEngine.sendCC(controller: midiCC, value: ccVal)
         }
@@ -590,7 +861,7 @@ struct ContentView: View {
 
         currentNote = freqToNote(currentFreq)
         waveform = audioEngine.copyWaveform()
-        sysAudioActive = systemAudio.isCapturing
+        sourceActive = audioSourceManager.isCapturing
 
         if audioEngine.consumeBeatFlash() {
             beatFlash = true

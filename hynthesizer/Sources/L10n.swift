@@ -15,6 +15,21 @@ enum L10n {
     static var modeScale: String { pick("Scale", "Scale", "Scale") }
     static var modeFader: String { pick("Fader", "Fader", "Fader") }
     static var modeRhythm: String { pick("Rhythm", "Rhythm", "Rhythm") }
+    static var modeFilter: String { pick("Filter", "Filter", "Filter") }
+
+    // MARK: - Filter
+    static var filterLowPass: String { pick("Low-Pass", "Low-Pass", "Low-Pass") }
+    static var filterBandPass: String { pick("Band-Pass", "Band-Pass", "Band-Pass") }
+    static var filterHighPass: String { pick("High-Pass", "High-Pass", "High-Pass") }
+    static var filterCutoff: String {
+        pick("컷오프 주파수", "Cutoff Freq", "カットオフ周波数")
+    }
+    static var filterActive: String {
+        pick("필터 스윕 활성", "Filter sweep active", "フィルタースイープ有効")
+    }
+    static var compressor: String {
+        pick("컴프레서", "Compressor", "コンプレッサー")
+    }
 
     // MARK: - Tips
     static var vinylOverlayTip: String {
@@ -38,6 +53,35 @@ enum L10n {
             "시스템 오디오 스크래치 활성",
             "System audio scratch active",
             "システムオーディオスクラッチ有効"
+        )
+    }
+
+    // MARK: - Audio Source
+    static var sourceSystem: String { pick("System", "System", "System") }
+    static var sourceFile: String { pick("File", "File", "File") }
+    static var sourceMic: String { pick("Mic", "Mic", "Mic") }
+    static var loadFile: String {
+        pick("파일 열기", "Load File", "ファイルを開く")
+    }
+    static var noFileLoaded: String {
+        pick("파일을 선택하세요", "No file loaded", "ファイルを選択してください")
+    }
+    static var filePickerMessage: String {
+        pick("오디오 파일을 선택하세요", "Select an audio file", "オーディオファイルを選択してください")
+    }
+    static var micRecording: String {
+        pick("마이크 녹음 중", "Mic recording", "マイク録音中")
+    }
+    static var micInactive: String {
+        pick("마이크 대기 중", "Mic inactive", "マイク待機中")
+    }
+    static var play: String { pick("재생", "Play", "再生") }
+    static var pause: String { pick("일시정지", "Pause", "一時停止") }
+    static var turntableHint: String {
+        pick(
+            "힌지를 움직여 스크래치",
+            "Move hinge to scratch",
+            "ヒンジを動かしてスクラッチ"
         )
     }
 
