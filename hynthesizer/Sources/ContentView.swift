@@ -95,6 +95,11 @@ struct ContentView: View {
             prevVinylAngle = currentAngle
             // Only vinyl mode uses system audio mixing
             audioEngine.setMixSystemAudio(val == .vinyl)
+            // Sync freq immediately so sound works right after mode switch
+            if val == .glide {
+                let freq = angleToFreqGlide(currentAngle)
+                audioEngine.setTargetFreq(freq)
+            }
         }
         .onChange(of: instrument) { _, val in
             audioEngine.setHarmonics(val.harmonics)
@@ -105,8 +110,18 @@ struct ContentView: View {
         .onChange(of: synthEnabled) { _, val in
             if val {
                 // Immediately set freq from current angle so sound starts instantly
-                let freq = angleToFreqGlide(currentAngle)
+                let freq: Double
+                if mode == .glide {
+                    freq = angleToFreqGlide(currentAngle)
+                } else if let midi = angleToMidiFader(currentAngle, scale: scaleType, prevMidi: prevMidi) {
+                    freq = midiToFreq(midi)
+                } else {
+                    freq = 0
+                }
                 audioEngine.setTargetFreq(freq)
+                if mode != .glide && freq > 20 {
+                    audioEngine.triggerNote()
+                }
             }
             audioEngine.setMuted(!val)
         }

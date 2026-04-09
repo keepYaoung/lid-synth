@@ -126,7 +126,10 @@ final class AudioEngine {
     func setVolume(_ v: Double)      { volume = v }
     func setMuted(_ m: Bool) {
         muted = m
-        if !m { smoothFreq = targetFreq }  // unmute → sync freq immediately
+        if !m {
+            smoothFreq = targetFreq  // unmute → sync freq immediately
+            phase = 0                // reset phase for clean start
+        }
     }
     func setBpm(_ b: Double)         { bpm = b }
     func triggerNote()               { noteTrigger = true }
