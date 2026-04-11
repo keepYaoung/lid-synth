@@ -64,6 +64,8 @@ struct ContentView: View {
         .background(Color(white: 0.04))
         .onAppear {
             audioEngine.audioSource = audioSourceManager
+            audioEngine.setHarmonics(instrument.harmonics)
+            audioEngine.setPercType(instrument)
             audioEngine.start()
             Task { await audioSourceManager.start() }
 
@@ -258,11 +260,11 @@ struct ContentView: View {
         VStack(spacing: 6) {
             HStack(spacing: 0) {
                 modeButton(L10n.modeVinyl, icon: "opticaldisc", mode: .vinyl)
+                modeButton(L10n.modeFilter, icon: "line.3.horizontal.decrease", mode: .filter)
                 modeButton(L10n.modeGlide, icon: "waveform.path", mode: .glide)
                 modeButton(L10n.modeScale, icon: "pianokeys", mode: .scale)
                 modeButton(L10n.modeFader, icon: "slider.vertical.3", mode: .pitchFader)
                 modeButton(L10n.modeRhythm, icon: "metronome", mode: .rhythm)
-                modeButton(L10n.modeFilter, icon: "line.3.horizontal.decrease", mode: .filter)
             }
 
         }

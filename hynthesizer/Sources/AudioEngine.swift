@@ -43,7 +43,7 @@ final class AudioEngine {
     private var muted = true
 
     // Percussion state
-    private var percType: InstrumentType = .kick
+    private var percType: InstrumentType = .theremin
     private var percSamplePos: Int = 0      // position in one-shot percussion
     private var percTriggered: Bool = false  // new hit triggered
 
