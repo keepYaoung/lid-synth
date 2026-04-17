@@ -315,13 +315,18 @@ final class AudioSourceManager: NSObject {
                 }
             } else if let converter = micConverter {
                 guard let outBuf = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: maxOutFrames) else { return }
-                var isDone = false
+                let isDone = UnsafeMutablePointer<Bool>.allocate(capacity: 1)
+                isDone.initialize(to: false)
+                defer {
+                    isDone.deinitialize(count: 1)
+                    isDone.deallocate()
+                }
                 let inputBlock: AVAudioConverterInputBlock = { _, outStatus -> AVAudioBuffer? in
-                    if isDone {
+                    if isDone.pointee {
                         outStatus.pointee = .noDataNow
                         return nil
                     }
-                    isDone = true
+                    isDone.pointee = true
                     outStatus.pointee = .haveData
                     return buffer
                 }
